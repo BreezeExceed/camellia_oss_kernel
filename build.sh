@@ -19,7 +19,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Config (mirrors workflow env + inputs)
 # ---------------------------------------------------------------------------
-DEFCONFIG="${DEFCONFIG:-camellian_defconfig}"
+DEFCONFIG="${DEFCONFIG:-camellian_gl_defconfig}"
 ARCH="arm64"
 CLANG_VERSION="clang-r383902"
 CLANG_REF="4114ce222c83ba93e9c12c91c6ced2541b28f88c"
