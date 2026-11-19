@@ -1,268 +1,208 @@
 #!/usr/bin/env bash
-# build_kernel.sh - Local kernel build script
-
+#
+# build-camellian-kernel.sh
+#
+# Local (Ubuntu 22.04) equivalent of:
+#   .github/workflows/build-kernel.yml
+#
+# Run from the root of the kernel source tree:
+#   cd /root/camellian-t-os
+#   chmod +x build-camellian-kernel.sh
+#   ./build-camellian-kernel.sh
+#
+# Optional:
+#   DEFCONFIG=camellian_gl_defconfig ./build-camellian-kernel.sh
+#   SKIP_DEPS=1 ./build-camellian-kernel.sh   # skip sudo apt install
+#
 set -euo pipefail
 
-# ─── Colors ───────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-
-info()    { echo -e "${CYAN}[INFO]${NC} $*"; }
-success() { echo -e "${GREEN}[OK]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERR]${NC} $*"; exit 1; }
-
-# ─── Config ───────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain-src"
+# ---------------------------------------------------------------------------
+# Config (mirrors workflow env + inputs)
+# ---------------------------------------------------------------------------
+DEFCONFIG="${DEFCONFIG:-camellian_defconfig}"
+ARCH="arm64"
 CLANG_VERSION="clang-r383902"
-CLANG_DIR="$SCRIPT_DIR/prebuilts/clang/host/linux-x86/$CLANG_VERSION"
-GCC_DIR="$SCRIPT_DIR/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+CLANG_REF="4114ce222c83ba93e9c12c91c6ced2541b28f88c"
+CLANG_REPO_URL="https://github.com/msft-mirror-aosp/platform.prebuilts.clang.host.linux-x86.git"
+GCC_REPO_URL="https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git"
+GCC_REF="lineage-19.1"
 
-DEFCONFIGS=(
-  camellian_defconfig
-  camellian_debug_defconfig
-  camellian_gl_defconfig
-  camellian_gl_debug_defconfig
-  camellian_id_defconfig
-  camellian_id_debug_defconfig
-  camellian_in_eea_defconfig
-  camellian_in_eea_debug_defconfig
-  camellian_ru_defconfig
-  camellian_ru_debug_defconfig
-  camellian_tr_defconfig
-  camellian_tr_debug_defconfig
+KERNEL_DIR="$(pwd)"
+test -f "$KERNEL_DIR/Makefile" || {
+  echo "ERROR: run this script from the kernel source root (Makefile not found)."
+  exit 1
+}
+
+TOOLCHAIN_SRC="$KERNEL_DIR/toolchain-src"
+CLANG_DEST="$KERNEL_DIR/prebuilts/clang/host/linux-x86/$CLANG_VERSION"
+CLANG_BIN="$CLANG_DEST/bin"
+GCC_DEST="$KERNEL_DIR/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+GCC_BIN="$GCC_DEST/bin"
+
+echo "Kernel source : $KERNEL_DIR"
+echo "Defconfig     : $DEFCONFIG"
+echo "Clang version : $CLANG_VERSION"
+echo
+
+# ---------------------------------------------------------------------------
+# 1) Install Dependencies
+# ---------------------------------------------------------------------------
+if [ "${SKIP_DEPS:-0}" != "1" ]; then
+  echo "=== [1/7] Install Dependencies ==="
+  sudo apt-get update
+  sudo apt-get install -y \
+    bc bison build-essential ccache \
+    curl flex git libelf-dev libssl-dev \
+    libncurses-dev lld make \
+    python3 rsync unzip zip \
+    device-tree-compiler \
+    gcc g++ liblz4-tool
+else
+  echo "=== [1/7] Install Dependencies (skipped, SKIP_DEPS=1) ==="
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Checkout AOSP Clang R383902 (sparse)
+# ---------------------------------------------------------------------------
+echo "=== [2/7] Checkout AOSP Clang R383902 ==="
+mkdir -p "$TOOLCHAIN_SRC"
+
+if [ ! -d "$TOOLCHAIN_SRC/clang/.git" ]; then
+  git clone --filter=blob:none --sparse \
+    "$CLANG_REPO_URL" "$TOOLCHAIN_SRC/clang"
+fi
+
+pushd "$TOOLCHAIN_SRC/clang" >/dev/null
+git sparse-checkout set "$CLANG_VERSION"
+git fetch --depth 1 origin "$CLANG_REF"
+git checkout "$CLANG_REF"
+popd >/dev/null
+
+# ---------------------------------------------------------------------------
+# 3) Checkout Android GCC 4.9
+# ---------------------------------------------------------------------------
+echo "=== [3/7] Checkout Android GCC 4.9 ==="
+if [ ! -d "$TOOLCHAIN_SRC/gcc/.git" ]; then
+  git clone --depth 1 -b "$GCC_REF" \
+    "$GCC_REPO_URL" "$TOOLCHAIN_SRC/gcc"
+fi
+
+# ---------------------------------------------------------------------------
+# 4) Setup TOS Toolchains
+# ---------------------------------------------------------------------------
+echo "=== [4/7] Setup TOS Toolchains ==="
+mkdir -p "$KERNEL_DIR/prebuilts/clang/host/linux-x86"
+mkdir -p "$KERNEL_DIR/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9"
+
+rm -rf "$CLANG_DEST"
+cp -a "$TOOLCHAIN_SRC/clang/$CLANG_VERSION" \
+      "$KERNEL_DIR/prebuilts/clang/host/linux-x86/"
+
+cp -a "$TOOLCHAIN_SRC/gcc/." "$GCC_DEST/"
+
+chmod +x "$CLANG_BIN/clang"
+
+test -x "$CLANG_BIN/clang"
+test -x "$CLANG_BIN/ld.lld"
+test -x "$GCC_BIN/aarch64-linux-androidkernel-gcc"
+
+export PATH="$CLANG_BIN:$GCC_BIN:$PATH"
+export LD_LIBRARY_PATH="$CLANG_DEST/lib64:${LD_LIBRARY_PATH:-}"
+
+echo "=== CLANG ==="
+"$CLANG_BIN/clang" --version
+echo "=== LLD ==="
+"$CLANG_BIN/ld.lld" --version
+echo "=== GCC ==="
+"$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
+
+# ---------------------------------------------------------------------------
+# 5) Verify Source
+# ---------------------------------------------------------------------------
+echo "=== [5/7] Verify Source ==="
+echo "=== KERNEL VERSION ==="
+grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' Makefile
+
+echo "=== DEFCONFIG ==="
+test -f "arch/arm64/configs/$DEFCONFIG"
+echo "$DEFCONFIG"
+
+echo "=== TOOLCHAIN CONFIG ==="
+cat build.config.mtk.aarch64
+
+# ---------------------------------------------------------------------------
+# 6) Build Kernel
+# ---------------------------------------------------------------------------
+echo "=== [6/7] Build Kernel ==="
+
+CROSS_COMPILE="$GCC_BIN/aarch64-linux-androidkernel-"
+
+BUILD_ARGS=(
+  -j"$(nproc)"
+  O=out
+  ARCH=arm64
+  CC=clang
+  LD=ld.lld
+  NM=llvm-nm
+  OBJCOPY=llvm-objcopy
+  AR=llvm-ar
+  OBJDUMP=llvm-objdump
+  STRIP=llvm-strip
+  CLANG_TRIPLE=aarch64-linux-gnu-
+  CROSS_COMPILE="$CROSS_COMPILE"
 )
 
-# ─── Defconfig picker ─────────────────────────────────────
-pick_defconfig() {
-  echo -e "\n${BOLD}Select defconfig:${NC}"
-  for i in "${!DEFCONFIGS[@]}"; do
-    printf "  ${CYAN}%2d)${NC} %s\n" "$((i+1))" "${DEFCONFIGS[$i]}"
-  done
-  echo ""
+echo "=== GENERATING CONFIG ==="
+make "${BUILD_ARGS[@]}" "$DEFCONFIG"
 
-  while true; do
-    read -rp "Enter number [1-${#DEFCONFIGS[@]}]: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && \
-       (( choice >= 1 && choice <= ${#DEFCONFIGS[@]} )); then
-      DEFCONFIG="${DEFCONFIGS[$((choice-1))]}"
-      success "Selected: $DEFCONFIG"
-      break
-    fi
-    warn "Invalid choice, try again."
-  done
-}
+echo "=== BUILDING KERNEL ==="
+make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
 
-# ─── Dependency check ─────────────────────────────────────
-check_deps() {
-  info "Checking dependencies..."
-  local missing_pkgs=()
+echo "=== BUILD OUTPUT ==="
+find out/arch/arm64/boot -maxdepth 2 -type f
 
-  declare -A DEP_MAP=(
-    [bc]="bc"
-    [bison]="bison"
-    [flex]="flex"
-    [git]="git"
-    [make]="make"
-    [python3]="python3"
-    [rsync]="rsync"
-    [zip]="zip"
-    [curl]="curl"
-    [lz4]="liblz4-tool"
-    [dtc]="device-tree-compiler"
-  )
+# ---------------------------------------------------------------------------
+# 7) Validate Artifacts (mirrors `if-no-files-found: error`)
+# ---------------------------------------------------------------------------
+echo "=== [7/7] Validate Artifacts ==="
+ARTIFACTS=(
+  "out/arch/arm64/boot/Image"
+  "out/arch/arm64/boot/Image.gz"
+  "out/arch/arm64/boot/Image.gz-dtb"
+  "out/vmlinux"
+  "out/System.map"
+  "out/.config"
+  "build.log"
+)
 
-  for cmd in "${!DEP_MAP[@]}"; do
-    if ! command -v "$cmd" &>/dev/null; then
-      warn "Missing command: $cmd (package: ${DEP_MAP[$cmd]})"
-      missing_pkgs+=("${DEP_MAP[$cmd]}")
-    fi
-  done
-
-  if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
-    local unique_pkgs
-    mapfile -t unique_pkgs < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
-    info "Installing: ${unique_pkgs[*]}"
-    sudo apt-get update -qq
-    sudo apt-get install -y \
-      bc bison build-essential ccache curl flex \
-      git libelf-dev libssl-dev libncurses-dev lld make \
-      python3 rsync unzip zip device-tree-compiler \
-      gcc g++ liblz4-tool
+missing=0
+for f in "${ARTIFACTS[@]}"; do
+  if [ -e "$f" ]; then
+    echo "  OK   $f"
+  else
+    echo "  MISS $f"
+    missing=1
   fi
+done
 
-  success "Dependencies OK"
-}
+dtb_count="$(find out/arch/arm64/boot -type f -name '*.dtb' 2>/dev/null | wc -l)"
+echo "  DTBs: $dtb_count file(s)"
+if [ "$dtb_count" -eq 0 ]; then
+  echo "  MISS no .dtb files found"
+  missing=1
+fi
 
-# ─── Clang setup ──────────────────────────────────────────
-setup_clang() {
-  if [[ -f "$CLANG_DIR/bin/clang" ]]; then
-    success "Clang already exists, skipping"
-    return
-  fi
+if [ "$missing" -ne 0 ]; then
+  echo "ERROR: one or more expected artifacts are missing."
+  exit 1
+fi
 
-  info "Cloning Clang (shallow, sparse)..."
-
-  local CLANG_SRC="$TOOLCHAIN_DIR/clang"
-  rm -rf "$CLANG_SRC"
-  mkdir -p "$CLANG_SRC"
-
-  git clone \
-    --filter=blob:none \
-    --no-checkout \
-    --depth=1 \
-    --sparse \
-    https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-    "$CLANG_SRC"
-
-  git -C "$CLANG_SRC" sparse-checkout init --cone
-  git -C "$CLANG_SRC" sparse-checkout set "$CLANG_VERSION"
-  git -C "$CLANG_SRC" checkout
-
-  # Fallback: full subtree checkout
-  if [[ ! -d "$CLANG_SRC/$CLANG_VERSION" ]]; then
-    warn "Sparse checkout failed, trying fallback..."
-    rm -rf "$CLANG_SRC"
-    mkdir -p "$CLANG_SRC"
-    git clone \
-      --filter=blob:none \
-      --no-checkout \
-      https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-      "$CLANG_SRC"
-    git -C "$CLANG_SRC" checkout HEAD -- "$CLANG_VERSION"
-  fi
-
-  [[ -d "$CLANG_SRC/$CLANG_VERSION" ]] || error "Clang source dir missing after clone!"
-
-  mkdir -p "$(dirname "$CLANG_DIR")"
-  cp -a "$CLANG_SRC/$CLANG_VERSION/." "$CLANG_DIR/"
-
-  [[ -f "$CLANG_DIR/bin/clang" ]] || error "Clang binary missing after copy!"
-  success "Clang ready → $CLANG_DIR"
-}
-
-# ─── GCC setup ────────────────────────────────────────────
-setup_gcc() {
-  if [[ -f "$GCC_DIR/bin/aarch64-linux-androidkernel-gcc" ]]; then
-    success "GCC already exists, skipping"
-    return
-  fi
-
-  info "Cloning GCC (shallow)..."
-
-  local GCC_SRC="$TOOLCHAIN_DIR/gcc"
-  rm -rf "$GCC_SRC"
-  mkdir -p "$GCC_SRC"
-
-  git clone \
-    --depth=1 \
-    --branch lineage-19.1 \
-    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
-    "$GCC_SRC"
-
-  [[ -d "$GCC_SRC/bin" ]] || error "GCC source bin dir missing!"
-
-  mkdir -p "$GCC_DIR"
-  cp -a "$GCC_SRC/." "$GCC_DIR/"
-
-  [[ -f "$GCC_DIR/bin/aarch64-linux-androidkernel-gcc" ]] || error "GCC binary missing after copy!"
-  success "GCC ready → $GCC_DIR"
-}
-
-# ─── Toolchain verify ─────────────────────────────────────
-verify_toolchains() {
-  local CLANG_BIN="$CLANG_DIR/bin"
-  local GCC_BIN="$GCC_DIR/bin"
-
-  chmod +x "$CLANG_BIN/clang"
-
-  [[ -x "$CLANG_BIN/clang" ]]           || error "clang not executable"
-  [[ -x "$CLANG_BIN/ld.lld" ]]          || error "ld.lld not executable"
-  [[ -x "$GCC_BIN/aarch64-linux-androidkernel-gcc" ]] || error "gcc not executable"
-
-  echo ""
-  echo "=== Clang ===" && "$CLANG_BIN/clang" --version
-  echo "=== LLD ===" && "$CLANG_BIN/ld.lld" --version
-  echo "=== GCC ===" && "$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
-  echo ""
-}
-
-# ─── Build ────────────────────────────────────────────────
-build_kernel() {
-  local CLANG_BIN="$CLANG_DIR/bin"
-  local GCC_BIN="$GCC_DIR/bin"
-  local CROSS_COMPILE="$GCC_BIN/aarch64-linux-androidkernel-"
-
-  export PATH="$CLANG_BIN:$GCC_BIN:$PATH"
-  export LD_LIBRARY_PATH="$CLANG_DIR/lib64:${LD_LIBRARY_PATH:-}"
-
-  local BUILD_ARGS=(
-    -j"$(nproc)"
-    O=out
-    ARCH=arm64
-    CC=clang
-    LD=ld.lld
-    NM=llvm-nm
-    OBJCOPY=llvm-objcopy
-    AR=llvm-ar
-    OBJDUMP=llvm-objdump
-    STRIP=llvm-strip
-    CLANG_TRIPLE=aarch64-linux-gnu-
-    CROSS_COMPILE="$CROSS_COMPILE"
-  )
-
-  info "Verifying defconfig exists..."
-  [[ -f "$SCRIPT_DIR/arch/arm64/configs/$DEFCONFIG" ]] || \
-    error "Defconfig not found: arch/arm64/configs/$DEFCONFIG"
-
-  info "Generating config: $DEFCONFIG"
-  make "${BUILD_ARGS[@]}" "$DEFCONFIG"
-
-  info "Building kernel ($(nproc) threads)..."
-  make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
-
-  echo ""
-  info "Build output:"
-  find out/arch/arm64/boot -maxdepth 2 -type f 2>/dev/null | sort || \
-    warn "No files found in out/arch/arm64/boot"
-
-  # Collect artifacts
-  local OUT_DIR="$SCRIPT_DIR/out_artifacts"
-  mkdir -p "$OUT_DIR"
-
-  local found=0
-  for f in Image Image.gz Image.gz-dtb; do
-    local src="out/arch/arm64/boot/$f"
-    if [[ -f "$src" ]]; then
-      cp "$src" "$OUT_DIR/"
-      success "Saved: $OUT_DIR/$f"
-      found=$((found+1))
-    fi
-  done
-
-  [[ $found -gt 0 ]] || error "No kernel images found! Check build.log"
-  success "Done! Artifacts in: $OUT_DIR"
-}
-
-# ─── Main ─────────────────────────────────────────────────
-main() {
-  cd "$SCRIPT_DIR"
-  echo -e "${BOLD}╔══════════════════════════════╗${NC}"
-  echo -e "${BOLD}║   Camellian Kernel Builder   ║${NC}"
-  echo -e "${BOLD}╚══════════════════════════════╝${NC}\n"
-
-  pick_defconfig
-  check_deps
-
-  mkdir -p "$TOOLCHAIN_DIR"
-  mkdir -p "$(dirname "$CLANG_DIR")"
-  mkdir -p "$GCC_DIR"
-
-  setup_clang
-  setup_gcc
-  verify_toolchains
-  build_kernel
-}
-
-main "$@"
+echo
+echo "Build complete. Artifacts are under: $KERNEL_DIR/out/"
+echo "  - Image        : out/arch/arm64/boot/Image"
+echo "  - Image.gz     : out/arch/arm64/boot/Image.gz"
+echo "  - Image.gz-dtb : out/arch/arm64/boot/Image.gz-dtb"
+echo "  - vmlinux      : out/vmlinux"
+echo "  - System.map   : out/System.map"
+echo "  - .config      : out/.config"
+echo "  - build log    : build.log"
