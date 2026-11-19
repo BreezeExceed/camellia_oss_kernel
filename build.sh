@@ -57,70 +57,135 @@ pick_defconfig() {
 # ─── Dependency check ─────────────────────────────────────
 check_deps() {
   info "Checking dependencies..."
-  local missing=()
-  for cmd in bc bison flex git make python3 rsync zip curl lz4 dtc; do
-    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  local missing_pkgs=()
+
+  declare -A DEP_MAP=(
+    [bc]="bc"
+    [bison]="bison"
+    [flex]="flex"
+    [git]="git"
+    [make]="make"
+    [python3]="python3"
+    [rsync]="rsync"
+    [zip]="zip"
+    [curl]="curl"
+    [lz4]="liblz4-tool"
+    [dtc]="device-tree-compiler"
+  )
+
+  for cmd in "${!DEP_MAP[@]}"; do
+    if ! command -v "$cmd" &>/dev/null; then
+      warn "Missing command: $cmd (package: ${DEP_MAP[$cmd]})"
+      missing_pkgs+=("${DEP_MAP[$cmd]}")
+    fi
   done
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    warn "Missing: ${missing[*]}"
-    info "Installing..."
+
+  if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+    local unique_pkgs
+    mapfile -t unique_pkgs < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
+    info "Installing: ${unique_pkgs[*]}"
     sudo apt-get update -qq
-    sudo apt-get install -y bc bison build-essential ccache curl flex \
-      git libelf-dev libssl-dev libncurses-dev lld make python3 \
-      rsync unzip zip device-tree-compiler gcc g++ liblz4-tool
+    sudo apt-get install -y \
+      bc bison build-essential ccache curl flex \
+      git libelf-dev libssl-dev libncurses-dev lld make \
+      python3 rsync unzip zip device-tree-compiler \
+      gcc g++ liblz4-tool
   fi
+
   success "Dependencies OK"
 }
 
-# ─── Toolchain setup (shallow clone) ──────────────────────
-setup_toolchains() {
-  mkdir -p "$TOOLCHAIN_DIR"
-
-  # Clang
-  if [[ ! -d "$CLANG_DIR" ]]; then
-    info "Cloning Clang (shallow, sparse)..."
-    mkdir -p "$TOOLCHAIN_DIR/clang"
-    git clone \
-      --depth=1 \
-      --filter=blob:none \
-      --sparse \
-      https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-      "$TOOLCHAIN_DIR/clang"
-    git -C "$TOOLCHAIN_DIR/clang" sparse-checkout set "$CLANG_VERSION"
-    mkdir -p "$(dirname "$CLANG_DIR")"
-    cp -a "$TOOLCHAIN_DIR/clang/$CLANG_VERSION" "$CLANG_DIR"
-    success "Clang ready"
-  else
+# ─── Clang setup ──────────────────────────────────────────
+setup_clang() {
+  if [[ -f "$CLANG_DIR/bin/clang" ]]; then
     success "Clang already exists, skipping"
+    return
   fi
 
-  # GCC
-  if [[ ! -d "$GCC_DIR" ]]; then
-    info "Cloning GCC (shallow)..."
+  info "Cloning Clang (shallow, sparse)..."
+
+  local CLANG_SRC="$TOOLCHAIN_DIR/clang"
+  rm -rf "$CLANG_SRC"
+  mkdir -p "$CLANG_SRC"
+
+  git clone \
+    --filter=blob:none \
+    --no-checkout \
+    --depth=1 \
+    --sparse \
+    https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+    "$CLANG_SRC"
+
+  git -C "$CLANG_SRC" sparse-checkout init --cone
+  git -C "$CLANG_SRC" sparse-checkout set "$CLANG_VERSION"
+  git -C "$CLANG_SRC" checkout
+
+  # Fallback: full subtree checkout
+  if [[ ! -d "$CLANG_SRC/$CLANG_VERSION" ]]; then
+    warn "Sparse checkout failed, trying fallback..."
+    rm -rf "$CLANG_SRC"
+    mkdir -p "$CLANG_SRC"
     git clone \
-      --depth=1 \
-      https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
-      --branch lineage-19.1 \
-      "$TOOLCHAIN_DIR/gcc"
-    mkdir -p "$GCC_DIR"
-    cp -a "$TOOLCHAIN_DIR/gcc/." "$GCC_DIR/"
-    success "GCC ready"
-  else
-    success "GCC already exists, skipping"
+      --filter=blob:none \
+      --no-checkout \
+      https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+      "$CLANG_SRC"
+    git -C "$CLANG_SRC" checkout HEAD -- "$CLANG_VERSION"
   fi
 
-  # Verify
+  [[ -d "$CLANG_SRC/$CLANG_VERSION" ]] || error "Clang source dir missing after clone!"
+
+  mkdir -p "$(dirname "$CLANG_DIR")"
+  cp -a "$CLANG_SRC/$CLANG_VERSION/." "$CLANG_DIR/"
+
+  [[ -f "$CLANG_DIR/bin/clang" ]] || error "Clang binary missing after copy!"
+  success "Clang ready → $CLANG_DIR"
+}
+
+# ─── GCC setup ────────────────────────────────────────────
+setup_gcc() {
+  if [[ -f "$GCC_DIR/bin/aarch64-linux-androidkernel-gcc" ]]; then
+    success "GCC already exists, skipping"
+    return
+  fi
+
+  info "Cloning GCC (shallow)..."
+
+  local GCC_SRC="$TOOLCHAIN_DIR/gcc"
+  rm -rf "$GCC_SRC"
+  mkdir -p "$GCC_SRC"
+
+  git clone \
+    --depth=1 \
+    --branch lineage-19.1 \
+    https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+    "$GCC_SRC"
+
+  [[ -d "$GCC_SRC/bin" ]] || error "GCC source bin dir missing!"
+
+  mkdir -p "$GCC_DIR"
+  cp -a "$GCC_SRC/." "$GCC_DIR/"
+
+  [[ -f "$GCC_DIR/bin/aarch64-linux-androidkernel-gcc" ]] || error "GCC binary missing after copy!"
+  success "GCC ready → $GCC_DIR"
+}
+
+# ─── Toolchain verify ─────────────────────────────────────
+verify_toolchains() {
   local CLANG_BIN="$CLANG_DIR/bin"
   local GCC_BIN="$GCC_DIR/bin"
 
   chmod +x "$CLANG_BIN/clang"
-  [[ -x "$CLANG_BIN/clang" ]]           || error "clang not found"
-  [[ -x "$CLANG_BIN/ld.lld" ]]          || error "ld.lld not found"
-  [[ -x "$GCC_BIN/aarch64-linux-androidkernel-gcc" ]] || error "gcc not found"
 
-  echo -e "\n=== Clang ===" && "$CLANG_BIN/clang" --version
+  [[ -x "$CLANG_BIN/clang" ]]           || error "clang not executable"
+  [[ -x "$CLANG_BIN/ld.lld" ]]          || error "ld.lld not executable"
+  [[ -x "$GCC_BIN/aarch64-linux-androidkernel-gcc" ]] || error "gcc not executable"
+
+  echo ""
+  echo "=== Clang ===" && "$CLANG_BIN/clang" --version
   echo "=== LLD ===" && "$CLANG_BIN/ld.lld" --version
   echo "=== GCC ===" && "$GCC_BIN/aarch64-linux-androidkernel-gcc" --version
+  echo ""
 }
 
 # ─── Build ────────────────────────────────────────────────
@@ -147,24 +212,36 @@ build_kernel() {
     CROSS_COMPILE="$CROSS_COMPILE"
   )
 
+  info "Verifying defconfig exists..."
+  [[ -f "$SCRIPT_DIR/arch/arm64/configs/$DEFCONFIG" ]] || \
+    error "Defconfig not found: arch/arm64/configs/$DEFCONFIG"
+
   info "Generating config: $DEFCONFIG"
   make "${BUILD_ARGS[@]}" "$DEFCONFIG"
 
-  info "Building Image.gz-dtb ($(nproc) threads)..."
+  info "Building kernel ($(nproc) threads)..."
   make "${BUILD_ARGS[@]}" Image.gz-dtb 2>&1 | tee build.log
 
   echo ""
   info "Build output:"
-  find out/arch/arm64/boot -maxdepth 2 -type f | sort
+  find out/arch/arm64/boot -maxdepth 2 -type f 2>/dev/null | sort || \
+    warn "No files found in out/arch/arm64/boot"
 
   # Collect artifacts
   local OUT_DIR="$SCRIPT_DIR/out_artifacts"
   mkdir -p "$OUT_DIR"
+
+  local found=0
   for f in Image Image.gz Image.gz-dtb; do
     local src="out/arch/arm64/boot/$f"
-    [[ -f "$src" ]] && cp "$src" "$OUT_DIR/" && success "Saved: $OUT_DIR/$f"
+    if [[ -f "$src" ]]; then
+      cp "$src" "$OUT_DIR/"
+      success "Saved: $OUT_DIR/$f"
+      found=$((found+1))
+    fi
   done
 
+  [[ $found -gt 0 ]] || error "No kernel images found! Check build.log"
   success "Done! Artifacts in: $OUT_DIR"
 }
 
@@ -177,7 +254,14 @@ main() {
 
   pick_defconfig
   check_deps
-  setup_toolchains
+
+  mkdir -p "$TOOLCHAIN_DIR"
+  mkdir -p "$(dirname "$CLANG_DIR")"
+  mkdir -p "$GCC_DIR"
+
+  setup_clang
+  setup_gcc
+  verify_toolchains
   build_kernel
 }
 
